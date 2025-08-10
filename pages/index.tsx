@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { getSupabase } from '../lib/supabase';
 
 function decodeEntities(str: string) {
   if (!str) return str as any;
@@ -27,13 +27,8 @@ function normalizeContentHTML(html: string) {
         const pieces = p.split(/\s+/);
         const url = pieces[0];
         const size = pieces.slice(1).join(' ');
-        // Normalize to absolute URL
         let absUrl = url;
-        const abs = url.match(/^https?:\/\/[^\/]+(\/.*)$/i);
-        if (!abs) {
-          // protocol-relative or relative
-          if (url.startsWith('//')) absUrl = 'https:' + url;
-        }
+        if (url.startsWith('//')) absUrl = 'https:' + url;
         const proxied = `/api/image?u=${encodeURIComponent(absUrl)}`;
         return size ? `${proxied} ${size}` : proxied;
       })
@@ -70,7 +65,7 @@ export default function Home() {
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   async function ensureSite() {
-    // upsert site by base_url
+    const supabase = getSupabase();
     const { data, error } = await supabase
       .from('sites')
       .upsert({
@@ -140,10 +135,10 @@ export default function Home() {
     if (!data?.raw || !siteRow?.id) return;
     setSaving(true); setSaveMsg(null); setError(null);
     try {
+      const supabase = getSupabase();
       const site_id = siteRow.id;
       const wp_post_id = data.raw.id;
-      // upsert post
-      const { data: postRow, error: pErr } = await supabase
+      const { error: pErr } = await supabase
         .from('posts')
         .upsert({
           site_id,
@@ -161,11 +156,8 @@ export default function Home() {
           tags: data.raw?._embedded?.terms?.[1] || null,
           last_wp_modified: data.modified,
           last_synced_at: new Date().toISOString()
-        }, { onConflict: 'site_id,wp_post_id' })
-        .select()
-        .single();
+        }, { onConflict: 'site_id,wp_post_id' });
       if (pErr) throw pErr;
-
       setSaveMsg('Saved in DDHQ Lite 👍');
     } catch (e:any) {
       setError(e.message || 'Save failed');
@@ -222,10 +214,10 @@ export default function Home() {
       )}
 
       <div className="help">
-        <p>Next:</p>
+        <p>Set env vars in Vercel → Project → Settings → Environment Variables:</p>
         <ul>
-          <li>We’ll add SEO meta pulls (Rank Math keys) and store them in <code>post_seo</code>.</li>
-          <li>Then drop in TinyMCE for editing and saving back to Supabase.</li>
+          <li><code>NEXT_PUBLIC_SUPABASE_URL</code></li>
+          <li><code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code></li>
         </ul>
       </div>
     </div>
