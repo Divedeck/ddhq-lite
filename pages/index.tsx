@@ -8,16 +8,15 @@ function decodeEntities(str: string) {
   return (txt as HTMLTextAreaElement).value;
 }
 
-// Force all <img> and <source> image URLs to https://divedeck.net + path.
-// Also convert lazy-load attributes (data-src, data-srcset) to real ones.
+// Rewrites image sources to go through /api/image proxy and activates lazy-loaded attributes.
 function normalizeContentHTML(html: string) {
   if (!html) return html;
 
-  // 1) Convert lazy load attributes to active ones
+  // Activate lazy attributes
   html = html.replace(/\sdata-srcset=/gi, ' srcset=');
   html = html.replace(/\sdata-src=/gi, ' src=');
 
-  // 2) Rewrite srcset entries so every URL host becomes https://divedeck.net
+  // Force srcset entries through proxy
   html = html.replace(/srcset=["']([^"']+)["']/gi, (_m, set) => {
     const rebuilt = set
       .split(',')
@@ -27,55 +26,36 @@ function normalizeContentHTML(html: string) {
         const pieces = p.split(/\s+/);
         const url = pieces[0];
         const size = pieces.slice(1).join(' ');
-        // Extract path part if absolute
+        // Normalize to absolute URL on divedeck.net
         let path = url;
-        const m = url.match(/^https?:\/\/[^\/]+(\/.*)$/i);
-        if (m) path = m[1];
-        // Protocol-relative
-        const m2 = url.match(/^\/\/(.*)$/);
-        if (m2) path = '/' + m2[1].replace(/^[^\/]+/, '');
-        // Ensure leading slash
-        if (!path.startsWith('/')) {
-          // Handle relative paths like wp-content/..
-          if (path.startsWith('wp-content')) path = '/' + path;
-          else path = '/' + path;
-        }
-        const forced = 'https://divedeck.net' + path;
-        return size ? `${forced} ${size}` : forced;
+        const abs = url.match(/^https?:\/\/[^\/]+(\/.*)$/i);
+        if (abs) path = abs[1];
+        const proto = url.match(/^\/\/(.*)$/);
+        if (proto) path = '/' + proto[1].replace(/^[^\/]+/, '');
+        if (!path.startsWith('/')) path = '/' + path;
+        const absUrl = `https://divedeck.net${path}`;
+        const proxied = `/api/image?u=${encodeURIComponent(absUrl)}`;
+        return size ? `${proxied} ${size}` : proxied;
       })
       .join(', ');
     return `srcset="${rebuilt}"`;
   });
 
-  // 3) Rewrite <img src="..."> to https://divedeck.net + path
+  // Force <img src="..."> through proxy (only obvious images)
   html = html.replace(/src=["']([^"']+)["']/gi, (_m, url) => {
-    // Skip non-image tags like <script src>, <iframe src> etc. by checking common image extensions
     const lower = url.toLowerCase();
-    const looksImg = /(\.jpg|\.jpeg|\.png|\.gif|\.webp|\.avif)(\?|#|$)/.test(lower) || /\/wp-content\//i.test(lower);
-    if (!looksImg) return _m;
+    const isImg = /(\.jpg|\.jpeg|\.png|\.gif|\.webp|\.avif)(\?|#|$)/.test(lower) || /\/wp-content\//i.test(lower);
+    if (!isImg) return _m;
 
     let path = url;
-    // Absolute http/https
     const abs = url.match(/^https?:\/\/[^\/]+(\/.*)$/i);
     if (abs) path = abs[1];
-    // Protocol-relative (//cdn...)
     const proto = url.match(/^\/\/(.*)$/);
-    if (proto) {
-      path = '/' + proto[1].replace(/^[^\/]+/, '');
-    }
-    // Relative starting with /
-    if (path.startsWith('/')) {
-      // good
-    } else {
-      // relative like wp-content/..
-      path = '/' + path;
-    }
+    if (proto) path = '/' + proto[1].replace(/^[^\/]+/, '');
+    if (!path.startsWith('/')) path = '/' + path;
+    const absUrl = `https://divedeck.net${path}`;
 
-    // Add simple cache-buster to avoid CDN stale blocks
-    const sep = path.includes('?') ? '&' : '?';
-    const cacheBust = `${sep}v=${Date.now()}`;
-
-    return `src="https://divedeck.net${path}${cacheBust}"`;
+    return `src="/api/image?u=${encodeURIComponent(absUrl)}"`;
   });
 
   return html;
@@ -111,7 +91,7 @@ export default function Home() {
       const title = decodeEntities(json?.title?.rendered || '');
       const link = json?.link || '';
 
-      // Featured image: ensure host is forced to divedeck.net as well
+      // Featured image through proxy as well
       let featuredUrl = '';
       let featuredAlt = '';
       const media = json?._embedded?.['wp:featuredmedia']?.[0];
@@ -125,7 +105,8 @@ export default function Home() {
           const proto = url0.match(/^\/\/(.*)$/);
           if (proto) path = '/' + proto[1].replace(/^[^\/]+/, '');
           if (!path.startsWith('/')) path = '/' + path;
-          featuredUrl = `https://divedeck.net${path}?v=${Date.now()}`;
+          const absUrl = `https://divedeck.net${path}`;
+          featuredUrl = `/api/image?u=${encodeURIComponent(absUrl)}`;
         }
       }
 
@@ -175,9 +156,8 @@ export default function Home() {
       <div className="help">
         <p>Notes:</p>
         <ul>
-          <li>All image hosts are forced to <code>https://divedeck.net</code> at render time.</li>
-          <li>Lazy-load attributes (data-src/srcset) are activated.</li>
-          <li>A small cache-buster is appended to avoid CDN stale issues.</li>
+          <li>Images are proxied via <code>/api/image</code> to bypass hotlink/CDN blocks.</li>
+          <li>Only <code>divedeck.net</code> is allowed by the proxy for safety.</li>
         </ul>
       </div>
     </div>
