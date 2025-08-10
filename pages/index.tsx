@@ -96,7 +96,7 @@ export default function Home() {
         headers['Authorization'] = `Basic ${token}`;
       }
       const res = await fetch(url, { headers });
-      if (!res.ok) throw new Error(\`WP responded \${res.status}\`);
+      if (!res.ok) { throw new Error(`WP responded ${res.status}`); }
       const json: WPJson = await res.json();
 
       const rawContent = json?.content?.rendered || '';
