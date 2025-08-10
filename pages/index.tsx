@@ -8,6 +8,21 @@ function decodeEntities(str: string) {
   return (txt as HTMLTextAreaElement).value;
 }
 
+function normalizeContentHTML(html: string, siteUrl: string) {
+  if (!html) return html;
+  // 1) Replace lazy-load data-src/srcset with real src/srcset
+  html = html.replace(/\sdata-srcset=/gi, ' srcset=');
+  html = html.replace(/\sdata-src=/gi, ' src=');
+  // 2) Protocol-relative URLs //example.com -> https://example.com
+  html = html.replace(/src=["']\/\//gi, 'src="https://');
+  // 3) Force http -> https (if present)
+  const siteHost = siteUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  html = html.replace(new RegExp('src=["\']http://'+siteHost, 'gi'), 'src="https://'+siteHost);
+  // 4) Ensure relative image paths become absolute to site
+  html = html.replace(/src=["']\/(?!\/)/gi, 'src="'+siteUrl.replace(/\/$/,'')+'/');
+  return html;
+}
+
 export default function Home() {
   const [siteUrl, setSiteUrl] = useState('https://divedeck.net');
   const [wpUser, setWpUser] = useState('');
@@ -33,12 +48,23 @@ export default function Home() {
         throw new Error(`WP responded ${res.status}`);
       }
       const json = await res.json();
-      const content = json?.content?.rendered || '';
+      const rawContent = json?.content?.rendered || '';
+      const content = normalizeContentHTML(rawContent, siteUrl);
       const title = decodeEntities(json?.title?.rendered || '');
       const link = json?.link || '';
-      const featured = json?._embedded?.['wp:featuredmedia']?.[0];
-      const featuredUrl = featured?.source_url || '';
-      const featuredAlt = featured?.alt_text || '';
+
+      // Featured image: try several locations
+      let featuredUrl = '';
+      let featuredAlt = '';
+      const media = json?._embedded?.['wp:featuredmedia']?.[0];
+      if (media) {
+        featuredUrl = media?.source_url || media?.media_details?.sizes?.full?.source_url || '';
+        featuredAlt = media?.alt_text || media?.title?.rendered || '';
+        if (featuredUrl && featuredUrl.startsWith('//')) featuredUrl = 'https:' + featuredUrl;
+        if (featuredUrl && featuredUrl.startsWith('/')) featuredUrl = siteUrl.replace(/\/$/,'') + featuredUrl;
+        if (featuredUrl.startsWith('http://')) featuredUrl = featuredUrl.replace('http://','https://');
+      }
+
       setData({ title, content, link, featuredUrl, featuredAlt, raw: json });
     } catch (e:any) {
       setError(e.message || 'Unknown error');
@@ -85,9 +111,9 @@ export default function Home() {
       <div className="help">
         <p>Notes:</p>
         <ul>
-          <li>Use a valid WP Application Password on a user with access to the post.</li>
-          <li>This reads <code>/wp-json/wp/v2/posts/ID?_embed=1</code> and shows <code>content.rendered</code>.</li>
-          <li>Once this works, we’ll add Supabase storage + SEO meta pulls.</li>
+          <li>If images still don’t load, host may block hotlinking. We can add a small proxy in <code>/api/image</code> next.</li>
+          <li>Protocol-relative and http URLs are normalized to https.</li>
+          <li>Lazy-load attributes are converted to real <code>src/srcset</code>.</li>
         </ul>
       </div>
     </div>
