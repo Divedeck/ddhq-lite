@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { supabase } from '../lib/supabase';
 
 function decodeEntities(str: string) {
   if (!str) return str as any;
@@ -26,14 +27,13 @@ function normalizeContentHTML(html: string) {
         const pieces = p.split(/\s+/);
         const url = pieces[0];
         const size = pieces.slice(1).join(' ');
-        // Normalize to absolute URL on divedeck.net
-        let path = url;
+        // Normalize to absolute URL
+        let absUrl = url;
         const abs = url.match(/^https?:\/\/[^\/]+(\/.*)$/i);
-        if (abs) path = abs[1];
-        const proto = url.match(/^\/\/(.*)$/);
-        if (proto) path = '/' + proto[1].replace(/^[^\/]+/, '');
-        if (!path.startsWith('/')) path = '/' + path;
-        const absUrl = `https://divedeck.net${path}`;
+        if (!abs) {
+          // protocol-relative or relative
+          if (url.startsWith('//')) absUrl = 'https:' + url;
+        }
         const proxied = `/api/image?u=${encodeURIComponent(absUrl)}`;
         return size ? `${proxied} ${size}` : proxied;
       })
@@ -46,22 +46,18 @@ function normalizeContentHTML(html: string) {
     const lower = url.toLowerCase();
     const isImg = /(\.jpg|\.jpeg|\.png|\.gif|\.webp|\.avif)(\?|#|$)/.test(lower) || /\/wp-content\//i.test(lower);
     if (!isImg) return _m;
-
-    let path = url;
-    const abs = url.match(/^https?:\/\/[^\/]+(\/.*)$/i);
-    if (abs) path = abs[1];
-    const proto = url.match(/^\/\/(.*)$/);
-    if (proto) path = '/' + proto[1].replace(/^[^\/]+/, '');
-    if (!path.startsWith('/')) path = '/' + path;
-    const absUrl = `https://divedeck.net${path}`;
-
+    let absUrl = url;
+    if (url.startsWith('//')) absUrl = 'https:' + url;
     return `src="/api/image?u=${encodeURIComponent(absUrl)}"`;
   });
 
   return html;
 }
 
+type WPJson = any;
+
 export default function Home() {
+  const [siteName, setSiteName] = useState('DiveDeck');
   const [siteUrl, setSiteUrl] = useState('https://divedeck.net');
   const [wpUser, setWpUser] = useState('');
   const [wpAppPass, setWpAppPass] = useState('');
@@ -69,12 +65,35 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<any>(null);
+  const [siteRow, setSiteRow] = useState<any>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+
+  async function ensureSite() {
+    // upsert site by base_url
+    const { data, error } = await supabase
+      .from('sites')
+      .upsert({
+        name: siteName,
+        base_url: siteUrl.replace(/\/$/, ''),
+        wp_user: wpUser,
+        wp_app_password: wpAppPass
+      }, { onConflict: 'base_url' })
+      .select()
+      .single();
+    if (error) throw error;
+    setSiteRow(data);
+    return data;
+  }
 
   async function fetchPost() {
     setError(null);
     setData(null);
+    setSaveMsg(null);
     setLoading(true);
     try {
+      const site = await ensureSite();
+
       const url = `${siteUrl.replace(/\/$/,'')}/wp-json/wp/v2/posts/${postId}?_embed=1`;
       const headers: Record<string,string> = {};
       if (wpUser && wpAppPass && typeof window !== 'undefined') {
@@ -82,16 +101,19 @@ export default function Home() {
         headers['Authorization'] = `Basic ${token}`;
       }
       const res = await fetch(url, { headers });
-      if (!res.ok) {
-        throw new Error(`WP responded ${res.status}`);
-      }
-      const json = await res.json();
+      if (!res.ok) throw new Error(\`WP responded \${res.status}\`);
+      const json: WPJson = await res.json();
+
       const rawContent = json?.content?.rendered || '';
       const content = normalizeContentHTML(rawContent);
       const title = decodeEntities(json?.title?.rendered || '');
       const link = json?.link || '';
+      const slug = json?.slug || '';
+      const status = json?.status || '';
+      const modified = json?.modified ? new Date(json.modified).toISOString() : null;
+      const excerpt = decodeEntities(json?.excerpt?.rendered || '').replace(/<[^>]*>/g, '');
 
-      // Featured image through proxy as well
+      // Featured image
       let featuredUrl = '';
       let featuredAlt = '';
       const media = json?._embedded?.['wp:featuredmedia']?.[0];
@@ -99,18 +121,14 @@ export default function Home() {
         let url0 = media?.source_url || media?.media_details?.sizes?.full?.source_url || '';
         featuredAlt = media?.alt_text || media?.title?.rendered || '';
         if (url0) {
-          let path = url0;
-          const abs = url0.match(/^https?:\/\/[^\/]+(\/.*)$/i);
-          if (abs) path = abs[1];
-          const proto = url0.match(/^\/\/(.*)$/);
-          if (proto) path = '/' + proto[1].replace(/^[^\/]+/, '');
-          if (!path.startsWith('/')) path = '/' + path;
-          const absUrl = `https://divedeck.net${path}`;
-          featuredUrl = `/api/image?u=${encodeURIComponent(absUrl)}`;
+          if (url0.startsWith('//')) url0 = 'https:' + url0;
+          if (url0.startsWith('/')) url0 = `${siteUrl.replace(/\/$/,'')}${url0}`;
+          if (url0.startsWith('http://')) url0 = url0.replace('http://','https://');
+          featuredUrl = `/api/image?u=${encodeURIComponent(url0)}`;
         }
       }
 
-      setData({ title, content, link, featuredUrl, featuredAlt, raw: json });
+      setData({ title, content, link, slug, status, modified, excerpt, featuredUrl, featuredAlt, raw: json, site });
     } catch (e:any) {
       setError(e.message || 'Unknown error');
     } finally {
@@ -118,16 +136,62 @@ export default function Home() {
     }
   }
 
+  async function saveInApp() {
+    if (!data?.raw || !siteRow?.id) return;
+    setSaving(true); setSaveMsg(null); setError(null);
+    try {
+      const site_id = siteRow.id;
+      const wp_post_id = data.raw.id;
+      // upsert post
+      const { data: postRow, error: pErr } = await supabase
+        .from('posts')
+        .upsert({
+          site_id,
+          wp_post_id,
+          slug: data.slug,
+          permalink: data.link,
+          status: data.status === 'publish' ? 'published' : data.status,
+          title: data.title,
+          content_html: data.content,
+          excerpt: data.excerpt,
+          featured_image_url: data.featuredUrl || null,
+          featured_image_alt: data.featuredAlt || null,
+          author: data.raw?._embedded?.author?.[0]?.name || null,
+          categories: data.raw?._embedded?.terms?.[0] || null,
+          tags: data.raw?._embedded?.terms?.[1] || null,
+          last_wp_modified: data.modified,
+          last_synced_at: new Date().toISOString()
+        }, { onConflict: 'site_id,wp_post_id' })
+        .select()
+        .single();
+      if (pErr) throw pErr;
+
+      setSaveMsg('Saved in DDHQ Lite 👍');
+    } catch (e:any) {
+      setError(e.message || 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="wrap">
-      <h1>DDHQ Lite — WP Fetch Tester</h1>
+      <h1>DDHQ Lite — WP Fetch + Save</h1>
+
       <div className="card">
+        <h3>Connect Site</h3>
+        <label>Site Name</label>
+        <input value={siteName} onChange={e=>setSiteName(e.target.value)} placeholder="DiveDeck" />
         <label>Site URL</label>
         <input value={siteUrl} onChange={e=>setSiteUrl(e.target.value)} placeholder="https://example.com" />
         <label>WP Username (Application Password user)</label>
         <input value={wpUser} onChange={e=>setWpUser(e.target.value)} placeholder="admin" />
         <label>WP Application Password</label>
         <input value={wpAppPass} onChange={e=>setWpAppPass(e.target.value)} placeholder="abcd efgh ijkl ..." />
+      </div>
+
+      <div className="card">
+        <h3>Fetch Post</h3>
         <label>Post ID</label>
         <input value={postId} onChange={e=>setPostId(e.target.value)} />
         <button onClick={fetchPost} disabled={loading}>
@@ -136,6 +200,7 @@ export default function Home() {
       </div>
 
       {error && <div className="error">Error: {error}</div>}
+      {saveMsg && <div className="card" style={{borderColor:'#14532d'}}>✅ {saveMsg}</div>}
 
       {data && (
         <div className="card">
@@ -146,6 +211,9 @@ export default function Home() {
             <p><img src={data.featuredUrl} alt={data.featuredAlt || ''} style={{maxWidth:'100%'}}/></p>
           )}
           <div className="content" dangerouslySetInnerHTML={{__html: data.content}} />
+          <div style={{marginTop:'1rem'}}>
+            <button onClick={saveInApp} disabled={saving}>{saving ? 'Saving…' : 'Save in App'}</button>
+          </div>
           <details>
             <summary>Raw JSON</summary>
             <pre>{JSON.stringify(data.raw, null, 2)}</pre>
@@ -154,10 +222,10 @@ export default function Home() {
       )}
 
       <div className="help">
-        <p>Notes:</p>
+        <p>Next:</p>
         <ul>
-          <li>Images are proxied via <code>/api/image</code> to bypass hotlink/CDN blocks.</li>
-          <li>Only <code>divedeck.net</code> is allowed by the proxy for safety.</li>
+          <li>We’ll add SEO meta pulls (Rank Math keys) and store them in <code>post_seo</code>.</li>
+          <li>Then drop in TinyMCE for editing and saving back to Supabase.</li>
         </ul>
       </div>
     </div>

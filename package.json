@@ -1,6 +1,6 @@
 {
   "name": "ddhq-lite-starter",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,6 +9,7 @@
     "lint": "next lint || true"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.45.4",
     "next": "14.2.5",
     "react": "18.2.0",
     "react-dom": "18.2.0"
