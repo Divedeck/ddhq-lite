@@ -8,18 +8,76 @@ function decodeEntities(str: string) {
   return (txt as HTMLTextAreaElement).value;
 }
 
-function normalizeContentHTML(html: string, siteUrl: string) {
+// Force all <img> and <source> image URLs to https://divedeck.net + path.
+// Also convert lazy-load attributes (data-src, data-srcset) to real ones.
+function normalizeContentHTML(html: string) {
   if (!html) return html;
-  // 1) Replace lazy-load data-src/srcset with real src/srcset
+
+  // 1) Convert lazy load attributes to active ones
   html = html.replace(/\sdata-srcset=/gi, ' srcset=');
   html = html.replace(/\sdata-src=/gi, ' src=');
-  // 2) Protocol-relative URLs //example.com -> https://example.com
-  html = html.replace(/src=["']\/\//gi, 'src="https://');
-  // 3) Force http -> https (if present)
-  const siteHost = siteUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-  html = html.replace(new RegExp('src=["\']http://'+siteHost, 'gi'), 'src="https://'+siteHost);
-  // 4) Ensure relative image paths become absolute to site
-  html = html.replace(/src=["']\/(?!\/)/gi, 'src="'+siteUrl.replace(/\/$/,'')+'/');
+
+  // 2) Rewrite srcset entries so every URL host becomes https://divedeck.net
+  html = html.replace(/srcset=["']([^"']+)["']/gi, (_m, set) => {
+    const rebuilt = set
+      .split(',')
+      .map((part: string) => {
+        const p = part.trim();
+        if (!p) return p;
+        const pieces = p.split(/\s+/);
+        const url = pieces[0];
+        const size = pieces.slice(1).join(' ');
+        // Extract path part if absolute
+        let path = url;
+        const m = url.match(/^https?:\/\/[^\/]+(\/.*)$/i);
+        if (m) path = m[1];
+        // Protocol-relative
+        const m2 = url.match(/^\/\/(.*)$/);
+        if (m2) path = '/' + m2[1].replace(/^[^\/]+/, '');
+        // Ensure leading slash
+        if (!path.startsWith('/')) {
+          // Handle relative paths like wp-content/..
+          if (path.startsWith('wp-content')) path = '/' + path;
+          else path = '/' + path;
+        }
+        const forced = 'https://divedeck.net' + path;
+        return size ? `${forced} ${size}` : forced;
+      })
+      .join(', ');
+    return `srcset="${rebuilt}"`;
+  });
+
+  // 3) Rewrite <img src="..."> to https://divedeck.net + path
+  html = html.replace(/src=["']([^"']+)["']/gi, (_m, url) => {
+    // Skip non-image tags like <script src>, <iframe src> etc. by checking common image extensions
+    const lower = url.toLowerCase();
+    const looksImg = /(\.jpg|\.jpeg|\.png|\.gif|\.webp|\.avif)(\?|#|$)/.test(lower) || /\/wp-content\//i.test(lower);
+    if (!looksImg) return _m;
+
+    let path = url;
+    // Absolute http/https
+    const abs = url.match(/^https?:\/\/[^\/]+(\/.*)$/i);
+    if (abs) path = abs[1];
+    // Protocol-relative (//cdn...)
+    const proto = url.match(/^\/\/(.*)$/);
+    if (proto) {
+      path = '/' + proto[1].replace(/^[^\/]+/, '');
+    }
+    // Relative starting with /
+    if (path.startsWith('/')) {
+      // good
+    } else {
+      // relative like wp-content/..
+      path = '/' + path;
+    }
+
+    // Add simple cache-buster to avoid CDN stale blocks
+    const sep = path.includes('?') ? '&' : '?';
+    const cacheBust = `${sep}v=${Date.now()}`;
+
+    return `src="https://divedeck.net${path}${cacheBust}"`;
+  });
+
   return html;
 }
 
@@ -49,20 +107,26 @@ export default function Home() {
       }
       const json = await res.json();
       const rawContent = json?.content?.rendered || '';
-      const content = normalizeContentHTML(rawContent, siteUrl);
+      const content = normalizeContentHTML(rawContent);
       const title = decodeEntities(json?.title?.rendered || '');
       const link = json?.link || '';
 
-      // Featured image: try several locations
+      // Featured image: ensure host is forced to divedeck.net as well
       let featuredUrl = '';
       let featuredAlt = '';
       const media = json?._embedded?.['wp:featuredmedia']?.[0];
       if (media) {
-        featuredUrl = media?.source_url || media?.media_details?.sizes?.full?.source_url || '';
+        let url0 = media?.source_url || media?.media_details?.sizes?.full?.source_url || '';
         featuredAlt = media?.alt_text || media?.title?.rendered || '';
-        if (featuredUrl && featuredUrl.startsWith('//')) featuredUrl = 'https:' + featuredUrl;
-        if (featuredUrl && featuredUrl.startsWith('/')) featuredUrl = siteUrl.replace(/\/$/,'') + featuredUrl;
-        if (featuredUrl.startsWith('http://')) featuredUrl = featuredUrl.replace('http://','https://');
+        if (url0) {
+          let path = url0;
+          const abs = url0.match(/^https?:\/\/[^\/]+(\/.*)$/i);
+          if (abs) path = abs[1];
+          const proto = url0.match(/^\/\/(.*)$/);
+          if (proto) path = '/' + proto[1].replace(/^[^\/]+/, '');
+          if (!path.startsWith('/')) path = '/' + path;
+          featuredUrl = `https://divedeck.net${path}?v=${Date.now()}`;
+        }
       }
 
       setData({ title, content, link, featuredUrl, featuredAlt, raw: json });
@@ -111,9 +175,9 @@ export default function Home() {
       <div className="help">
         <p>Notes:</p>
         <ul>
-          <li>If images still don’t load, host may block hotlinking. We can add a small proxy in <code>/api/image</code> next.</li>
-          <li>Protocol-relative and http URLs are normalized to https.</li>
-          <li>Lazy-load attributes are converted to real <code>src/srcset</code>.</li>
+          <li>All image hosts are forced to <code>https://divedeck.net</code> at render time.</li>
+          <li>Lazy-load attributes (data-src/srcset) are activated.</li>
+          <li>A small cache-buster is appended to avoid CDN stale issues.</li>
         </ul>
       </div>
     </div>
