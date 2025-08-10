@@ -1,11 +1,11 @@
 import { useState } from 'react';
 
 function decodeEntities(str: string) {
-  if (!str) return str;
+  if (!str) return str as any;
   const txt = typeof window !== 'undefined' ? document.createElement('textarea') : null;
-  if (!txt) return str;
+  if (!txt) return str as any;
   txt.innerHTML = str;
-  return txt.value;
+  return (txt as HTMLTextAreaElement).value;
 }
 
 export default function Home() {
@@ -23,9 +23,9 @@ export default function Home() {
     setLoading(true);
     try {
       const url = `${siteUrl.replace(/\/$/,'')}/wp-json/wp/v2/posts/${postId}?_embed=1`;
-      const headers: any = {};
-      if (wpUser && wpAppPass) {
-        const token = Buffer.from(`${wpUser}:${wpAppPass}`).toString('base64');
+      const headers: Record<string,string> = {};
+      if (wpUser && wpAppPass && typeof window !== 'undefined') {
+        const token = btoa(`${wpUser}:${wpAppPass}`);
         headers['Authorization'] = `Basic ${token}`;
       }
       const res = await fetch(url, { headers });
@@ -87,7 +87,7 @@ export default function Home() {
         <ul>
           <li>Use a valid WP Application Password on a user with access to the post.</li>
           <li>This reads <code>/wp-json/wp/v2/posts/ID?_embed=1</code> and shows <code>content.rendered</code>.</li>
-          <li>Once this works, we’ll add SEO meta pulls and Supabase storage in Step 3.</li>
+          <li>Once this works, we’ll add Supabase storage + SEO meta pulls.</li>
         </ul>
       </div>
     </div>
